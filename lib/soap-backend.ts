@@ -141,7 +141,7 @@ async function soapCall<TReqBody, TResBody = unknown>(
     clearTimeout(timer);
 
     const text = await res.text();
-    let parsed: { Body?: Record<string, unknown> };
+    let parsed: { Body?: Record<string, unknown> } | Record<string, unknown>;
     try {
         parsed = JSON.parse(text);
     } catch {
@@ -157,7 +157,7 @@ async function soapCall<TReqBody, TResBody = unknown>(
     );
 
     // Look for a SOAP Fault.
-    const fault = (parsed.Body as { Fault?: { Reason?: { Text?: string }; Detail?: { Error?: { Code?: string } } } } | undefined)
+    const fault = ((parsed as { Body?: { Fault?: { Reason?: { Text?: string }; Detail?: { Error?: { Code?: string } } } } }).Body)
         ?.Fault;
     if (fault) {
         const code = fault.Detail?.Error?.Code || "";
@@ -165,6 +165,9 @@ async function soapCall<TReqBody, TResBody = unknown>(
         // Auth expired → bubble up so the caller can re-auth & retry.
         if (/AUTH_EXPIRED|AUTH_REQUIRED|NO_AUTH_TOKEN/i.test(code)) {
             throw new CarbonioError(`SOAP auth expired (${code})`, "AUTH_FAILED");
+        }
+        if (/AUTH_FAILED/i.test(code)) {
+            throw new CarbonioError(`SOAP auth failed (${code}): ${reason}`, "AUTH_FAILED");
         }
         if (/NO_SUCH_ACCOUNT/i.test(code)) {
             throw new CarbonioError(reason, "ACCOUNT_NOT_FOUND");
@@ -178,7 +181,19 @@ async function soapCall<TReqBody, TResBody = unknown>(
         throw new CarbonioError(`${code}: ${reason}`, "UNKNOWN");
     }
 
-    return parsed.Body as TResBody;
+    // Non-SOAP payload (e.g. AdminServlet 503 JSON) or any non-2xx without
+    // SOAP Fault. Surface as transport/auth infra error instead of allowing
+    // callers to crash by reading undefined properties.
+    const responseBody = (parsed as { Body?: unknown }).Body;
+    if (!res.ok || !responseBody) {
+        const snippet = JSON.stringify(redact(parsed)).slice(0, 500);
+        throw new CarbonioError(
+            `SOAP HTTP ${res.status}: ${snippet}`,
+            res.status === 401 || res.status === 403 ? "AUTH_FAILED" : "TRANSPORT",
+        );
+    }
+
+    return responseBody as TResBody;
 }
 
 /** Ensures we have a non-expired auth token; logs in if needed. */
