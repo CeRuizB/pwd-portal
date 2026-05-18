@@ -101,21 +101,19 @@ export async function changePassword(
 
     const email = pre.email;
 
-    // Build a multi-command stdin script for zmprov's interactive mode.
-    // Quote the password so spaces are preserved; escape backslashes and
-    // double-quotes inside it.
-    const quoted = '"' + password.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-    const script =
-        `sp ${email} ${quoted}\n` +
-        `ma ${email} zimbraPasswordMustChange FALSE\n` +
-        `exit\n`;
+    // 1) Set the new password. Sent via stdin (interactive mode) so the
+    //    password never appears in argv / `ps`. The password is double-quoted
+    //    and back-slashes / quotes inside it are escaped, matching zmprov's
+    //    interactive tokenizer.
+    const quoted =
+        '"' + password.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    const setPasswordScript = `sp ${email} ${quoted}\nexit\n`;
 
     try {
-        await runZmprov([], script);
-        console.log("[action] changePassword: success for", email);
+        await runZmprov([], setPasswordScript);
+        console.log("[action] changePassword: password set for", email);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        // Common zmprov failure: password doesn't satisfy the domain policy.
         if (/password/i.test(msg) && /policy|complex|history|length/i.test(msg)) {
             return {
                 ok: false,
@@ -126,6 +124,34 @@ export async function changePassword(
         return {
             ok: false,
             error: "No fue posible actualizar la contraseña. Inténtelo de nuevo.",
+        };
+    }
+
+    // 2) Clear the mustChange flag in a separate zmprov invocation. This one
+    //    has no secrets, so we can pass it as plain argv.
+    try {
+        await runZmprov([
+            "ma",
+            email,
+            "zimbraPasswordMustChange",
+            "FALSE",
+        ]);
+        console.log(
+            "[action] changePassword: zimbraPasswordMustChange cleared for",
+            email,
+        );
+    } catch (err) {
+        // The password change already succeeded; surface a softer error so the
+        // user knows their new password works, but flag the inconsistency.
+        console.error(
+            "[action] changePassword: failed to clear mustChange for",
+            email,
+            err instanceof Error ? err.message : err,
+        );
+        return {
+            ok: false,
+            error:
+                "La contraseña se actualizó, pero no se pudo limpiar la marca de cambio obligatorio. Contacte al administrador.",
         };
     }
 
