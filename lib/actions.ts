@@ -112,6 +112,7 @@ export async function changePassword(
 
     try {
         await runZmprov([], script);
+        console.log("[action] changePassword: success for", email);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // Common zmprov failure: password doesn't satisfy the domain policy.

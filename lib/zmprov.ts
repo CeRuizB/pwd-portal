@@ -15,8 +15,38 @@ const ZEXTRAS_USER = process.env.ZEXTRAS_USER || "zextras";
 const SUDO_BIN = process.env.SUDO_BIN || "/usr/bin/sudo";
 const NO_SUDO = process.env.ZMPROV_NO_SUDO === "1";
 const TIMEOUT_MS = Number(process.env.ZMPROV_TIMEOUT_MS || 15_000);
+const LOG_ENABLED = process.env.ZMPROV_LOG !== "0"; // on by default
 
 export type ZmprovResult = { stdout: string; stderr: string };
+
+/**
+ * Redacts password tokens from a `zmprov` stdin script so we can safely log it.
+ *
+ * Targets the `sp <account> <password>` command (set password) and the
+ * `ca <account> <password> ...` command (create account). Anything that
+ * follows on the same line after the account is replaced with `***`.
+ */
+function redactScript(script: string): string {
+    return script
+        .split(/\r?\n/)
+        .map((line) =>
+            line.replace(
+                /^(\s*(?:sp|ca)\s+\S+\s+)(.*)$/i,
+                (_m, head) => `${head}***`,
+            ),
+        )
+        .join("\n");
+}
+
+function truncate(s: string, max = 2000): string {
+    if (s.length <= max) return s;
+    return `${s.slice(0, max)}…(+${s.length - max} bytes)`;
+}
+
+function log(...parts: unknown[]) {
+    if (!LOG_ENABLED) return;
+    console.log("[zmprov]", ...parts);
+}
 
 /**
  * Run zmprov with the given CLI arguments. Optionally feeds data through
@@ -26,6 +56,9 @@ export type ZmprovResult = { stdout: string; stderr: string };
  * Arguments are passed as an argv array (never through a shell), so callers
  * do not need to perform shell-escaping. However, the *content* of each
  * argument is still consumed by zmprov, so callers MUST validate inputs.
+ *
+ * Every invocation is logged (command + stdin script with passwords redacted,
+ * exit code, stdout and stderr). Set `ZMPROV_LOG=0` to disable.
  */
 export function runZmprov(
     args: string[],
@@ -35,6 +68,14 @@ export function runZmprov(
     const argv = NO_SUDO
         ? args
         : ["-n", "-u", ZEXTRAS_USER, ZMPROV_BIN, ...args];
+
+    const callId = Math.random().toString(36).slice(2, 8);
+    const startedAt = Date.now();
+
+    log(`#${callId} exec:`, cmd, ...argv);
+    if (stdin !== undefined) {
+        log(`#${callId} stdin:`, JSON.stringify(redactScript(stdin)));
+    }
 
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, argv, {
@@ -55,20 +96,37 @@ export function runZmprov(
 
         child.on("error", (err) => {
             clearTimeout(timer);
+            log(
+                `#${callId} spawn-error (${Date.now() - startedAt}ms):`,
+                err.message,
+            );
             reject(err);
         });
 
         child.on("close", (code) => {
             clearTimeout(timer);
+            const elapsed = Date.now() - startedAt;
             if (killed) {
+                log(`#${callId} timeout after ${elapsed}ms`);
                 return reject(
                     new Error(`zmprov timed out after ${TIMEOUT_MS}ms`),
                 );
             }
+            const out = stdout.trim();
+            const errOut = stderr.trim();
+            log(
+                `#${callId} done:`,
+                `exit=${code}`,
+                `${elapsed}ms`,
+                `stdout=${JSON.stringify(truncate(out))}`,
+                errOut
+                    ? `stderr=${JSON.stringify(truncate(errOut))}`
+                    : 'stderr=""',
+            );
             if (code !== 0) {
                 return reject(
                     new Error(
-                        `zmprov exited with code ${code}: ${stderr.trim() || stdout.trim()}`,
+                        `zmprov exited with code ${code}: ${errOut || out}`,
                     ),
                 );
             }
