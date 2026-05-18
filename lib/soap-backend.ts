@@ -32,20 +32,39 @@ interface AuthState {
 
 const LOG_ENABLED = process.env.SOAP_LOG !== "0";
 const TIMEOUT_MS = Number(process.env.SOAP_TIMEOUT_MS || 15_000);
+const RETRY_MAX = Math.max(1, Number(process.env.SOAP_RETRY_MAX || 3));
+const RETRY_DELAY_MS = Math.max(100, Number(process.env.SOAP_RETRY_DELAY_MS || 400));
 
 function log(...parts: unknown[]) {
     if (!LOG_ENABLED) return;
     console.log("[soap]", ...parts);
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let configSanityLogged = false;
 function readConfig() {
-    const url = process.env.SOAP_URL;
-    const user = process.env.SOAP_ADMIN_USER;
-    const pwd = process.env.SOAP_ADMIN_PASSWORD;
+    const url = (process.env.SOAP_URL || "").trim();
+    const user = (process.env.SOAP_ADMIN_USER || "").trim();
+    const pwd = process.env.SOAP_ADMIN_PASSWORD || "";
     if (!url || !user || !pwd) {
         throw new CarbonioError(
             "SOAP backend is not configured (set SOAP_URL, SOAP_ADMIN_USER, SOAP_ADMIN_PASSWORD)",
             "AUTH_FAILED",
+        );
+    }
+    if (!configSanityLogged) {
+        configSanityLogged = true;
+        let host = "invalid-url";
+        try {
+            host = new URL(url).host;
+        } catch {
+            // keep invalid-url marker
+        }
+        log(
+            `config: user=${user} host=${host} pwdLen=${pwd.length} hasDollar=${pwd.includes("$")}`,
         );
     }
     return { url, user, pwd };
@@ -219,16 +238,49 @@ async function doAuth(): Promise<AuthState> {
             lifetime?: number; // ms
         };
     }
-    log("auth: requesting token for", user);
-    const res = await soapCall<typeof body, AuthResp>(body, { withAuth: false });
-    const token = res.AuthResponse?.authToken?.[0]?._content;
-    const lifetime = res.AuthResponse?.lifetime ?? 12 * 60 * 60 * 1000;
-    if (!token) {
-        throw new CarbonioError("AuthResponse missing authToken", "AUTH_FAILED");
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= RETRY_MAX; attempt += 1) {
+        try {
+            log(
+                "auth: requesting token for",
+                user,
+                `attempt=${attempt}/${RETRY_MAX}`,
+            );
+            const res = await soapCall<typeof body, AuthResp>(body, {
+                withAuth: false,
+            });
+            const token = res.AuthResponse?.authToken?.[0]?._content;
+            const lifetime = res.AuthResponse?.lifetime ?? 12 * 60 * 60 * 1000;
+            if (!token) {
+                throw new CarbonioError(
+                    "AuthResponse missing authToken",
+                    "AUTH_FAILED",
+                );
+            }
+            authState = { token, expiresAt: Date.now() + lifetime };
+            log(
+                "auth: token cached, expires in",
+                Math.round(lifetime / 1000),
+                "s",
+            );
+            return authState;
+        } catch (err) {
+            lastErr = err;
+            const retryable =
+                err instanceof CarbonioError &&
+                err.code === "TRANSPORT" &&
+                /SOAP HTTP 503/i.test(err.message);
+            if (!retryable || attempt >= RETRY_MAX) {
+                throw err;
+            }
+            const wait = RETRY_DELAY_MS * attempt;
+            log(`auth: transient 503, retrying in ${wait}ms`);
+            await sleep(wait);
+        }
     }
-    authState = { token, expiresAt: Date.now() + lifetime };
-    log("auth: token cached, expires in", Math.round(lifetime / 1000), "s");
-    return authState;
+    throw (lastErr instanceof Error
+        ? lastErr
+        : new CarbonioError("Unknown auth failure", "UNKNOWN"));
 }
 
 /** Wrapper that retries once if the call fails with AUTH_FAILED. */
@@ -239,6 +291,14 @@ async function withRetryOnAuth<T>(fn: () => Promise<T>): Promise<T> {
         if (err instanceof CarbonioError && err.code === "AUTH_FAILED") {
             authState = null;
             await doAuth();
+            return fn();
+        }
+        if (
+            err instanceof CarbonioError &&
+            err.code === "TRANSPORT" &&
+            /SOAP HTTP 503/i.test(err.message)
+        ) {
+            await sleep(RETRY_DELAY_MS);
             return fn();
         }
         throw err;
