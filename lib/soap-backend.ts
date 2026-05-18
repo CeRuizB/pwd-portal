@@ -1,4 +1,3 @@
-import { Agent, setGlobalDispatcher } from "undici";
 import { CarbonioBackend, CarbonioError } from "./backend";
 
 /**
@@ -53,21 +52,19 @@ function readConfig() {
 }
 
 /**
- * If `SOAP_INSECURE_TLS=1`, install a global undici dispatcher that skips
- * TLS verification. Done once per process; idempotent.
+ * If `SOAP_INSECURE_TLS=1`, disable TLS verification for Node.js HTTPS
+ * requests by setting `NODE_TLS_REJECT_UNAUTHORIZED=0` once per process.
  *
  * This is needed for Carbonio installs using self-signed certificates on
  * port 6071/7071. It only affects HTTPS requests made by `fetch()` in this
  * Node.js process.
  */
 let tlsConfigured = false;
-function ensureTlsDispatcher() {
+function ensureTlsBehavior() {
     if (tlsConfigured) return;
     tlsConfigured = true;
     if (process.env.SOAP_INSECURE_TLS === "1") {
-        setGlobalDispatcher(
-            new Agent({ connect: { rejectUnauthorized: false } }),
-        );
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
         console.warn(
             "[soap] TLS verification DISABLED (SOAP_INSECURE_TLS=1). Use only for self-signed dev certs.",
         );
@@ -100,7 +97,7 @@ async function soapCall<TReqBody, TResBody = unknown>(
     body: TReqBody,
     { withAuth = true }: { withAuth?: boolean } = {},
 ): Promise<TResBody> {
-    ensureTlsDispatcher();
+    ensureTlsBehavior();
     const { url } = readConfig();
 
     const envelope: SoapEnvelope<TReqBody> = {
