@@ -114,6 +114,8 @@ export async function changePassword(
         console.log("[action] changePassword: password set for", email);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        console.error("[action] changePassword: sp failed:", msg);
+
         if (/password/i.test(msg) && /policy|complex|history|length/i.test(msg)) {
             return {
                 ok: false,
