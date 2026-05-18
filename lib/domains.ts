@@ -1,12 +1,11 @@
-import { runZmprov } from "./zmprov";
+import { getBackend } from "./backend";
 
 /**
  * In-memory cache of valid domains served by this Carbonio install.
  *
  * Populated once at server start by `instrumentation.ts` and refreshed on
- * demand (e.g. after a manual `getAllDomains` call). The cache is process-local;
- * if you run multiple Node.js instances behind a load balancer, each instance
- * will maintain its own copy.
+ * demand. The cache is process-local; if you run multiple Node.js instances
+ * behind a load balancer, each instance will maintain its own copy.
  */
 let cachedDomains: Set<string> | null = null;
 let lastLoadedAt = 0;
@@ -26,7 +25,7 @@ export function isDomainAllowed(domain: string): boolean {
 }
 
 /**
- * Loads all Carbonio domains via `zmprov gad` and caches them.
+ * Loads all Carbonio domains via the configured backend and caches them.
  * Safe to call repeatedly; honours `DOMAIN_REFRESH_INTERVAL_MS`.
  */
 export async function loadDomains(force = false): Promise<string[]> {
@@ -39,11 +38,8 @@ export async function loadDomains(force = false): Promise<string[]> {
         return [...cachedDomains];
     }
 
-    const { stdout } = await runZmprov(["-l", "gad"]);
-    const domains = stdout
-        .split(/\r?\n/)
-        .map((l) => l.trim().toLowerCase())
-        .filter((l) => l.length > 0 && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(l));
+    const backend = await getBackend();
+    const domains = await backend.listDomains();
 
     cachedDomains = new Set(domains);
     lastLoadedAt = now;

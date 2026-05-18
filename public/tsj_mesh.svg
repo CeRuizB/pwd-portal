@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice" fill="none" stroke="#7fbcd6" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+  <g>
+    <circle cx="120" cy="180" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="320" cy="90" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="540" cy="220" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="780" cy="120" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="1050" cy="200" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="240" cy="380" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="460" cy="460" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="700" cy="360" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="950" cy="430" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="160" cy="620" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="380" cy="700" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="620" cy="640" r="2" fill="#7fbcd6" stroke="none" />
+    <circle cx="860" cy="720" r="2.5" fill="#7fbcd6" stroke="none" />
+    <circle cx="1100" cy="600" r="2" fill="#7fbcd6" stroke="none" />
+  </g>
+  <g>
+    <path d="M120 180 L320 90 L540 220 L240 380 Z" />
+    <path d="M540 220 L780 120 L1050 200 L700 360 Z" />
+    <path d="M240 380 L540 220 L460 460 Z" />
+    <path d="M460 460 L700 360 L950 430 L620 640 Z" />
+    <path d="M460 460 L240 380 L160 620 L380 700 Z" />
+    <path d="M620 640 L380 700 L460 460 Z" />
+    <path d="M950 430 L1050 200 L780 120 Z" />
+    <path d="M950 430 L620 640 L860 720 L1100 600 Z" />
+    <path d="M860 720 L620 640 L380 700 Z" />
+    <path d="M120 180 L240 380 L160 620 Z" />
+  </g>
+  <g stroke-width="0.4" opacity="0.7">
+    <path d="M0 100 L120 180" />
+    <path d="M1200 50 L1050 200" />
+    <path d="M1200 500 L950 430" />
+    <path d="M1200 780 L1100 600" />
+    <path d="M0 500 L160 620" />
+    <path d="M0 780 L160 620 L380 700" />
+  </g>
+</svg>
+

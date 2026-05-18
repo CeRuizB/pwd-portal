@@ -2,25 +2,38 @@
  * Next.js instrumentation hook.
  *
  * Runs once when the server boots (before it accepts requests). We use it to:
- *   1. Clear the global `zimbraChangePasswordListener` attribute. This
+ *   1. Initialise the chosen backend (zmprov or SOAP) and log which one.
+ *   2. Clear the global `zimbraChangePasswordListener` attribute. This
  *      attribute must hold a registered listener class name; any other value
- *      makes every `zmprov sp` call fail with `service.FAILURE`. We clear it
- *      unconditionally so the portal's `sp` invocations always succeed.
- *   2. Eagerly load the list of valid Carbonio domains so the first user
- *      request doesn't pay the cost of spawning zmprov.
+ *      makes every password change fail. We clear it unconditionally so the
+ *      portal's password resets always succeed.
+ *   3. Eagerly load the list of valid Carbonio domains so the first user
+ *      request doesn't pay the cost of a backend round-trip.
  *
- * Only registered on the Node.js runtime — `zmprov` is a local binary and
- * cannot be invoked from the Edge runtime.
+ * Only registered on the Node.js runtime — the zmprov backend spawns a local
+ * binary and the SOAP backend uses `fetch`, both of which require the Node
+ * runtime (not Edge).
  */
 export async function register() {
     if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-    const { runZmprov } = await import("./lib/zmprov");
+    const { getBackend } = await import("./lib/backend");
     const { loadDomains } = await import("./lib/domains");
+
+    let backend;
+    try {
+        backend = await getBackend();
+    } catch (err) {
+        console.error(
+            "[carbonio-pwd-portal] backend initialisation failed:",
+            err instanceof Error ? err.message : err,
+        );
+        return;
+    }
 
     // 1) Clear the change-password listener globally.
     try {
-        await runZmprov(["mcf", "zimbraChangePasswordListener", ""]);
+        await backend.clearGlobalPasswordListener();
         console.log(
             "[carbonio-pwd-portal] cleared global zimbraChangePasswordListener",
         );

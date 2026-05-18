@@ -1,7 +1,8 @@
 "use server";
 
+import { CarbonioError, getBackend } from "./backend";
 import { ensureDomainsLoaded, isDomainAllowed } from "./domains";
-import { runZmprov } from "./zmprov";
+import { checkRateLimit, getClientIp } from "./security";
 
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
@@ -17,22 +18,77 @@ function getWebmailUrl(): string {
     return process.env.WEBMAIL_URL || "/";
 }
 
+/** Generic message — never echo zmprov / SOAP error text to the browser. */
+const GENERIC_NOT_ELIGIBLE =
+    "La cuenta no requiere un cambio de contraseña en este momento.";
+const GENERIC_FAILURE =
+    "No fue posible procesar la solicitud. Inténtelo de nuevo.";
+
+const CHECK_LIMIT = {
+    name: "check",
+    limit: Number(process.env.RATE_LIMIT_CHECK || 10),
+    windowMs: 60_000, // 1 min
+};
+const CHANGE_LIMIT = {
+    name: "change",
+    limit: Number(process.env.RATE_LIMIT_CHANGE || 5),
+    windowMs: 5 * 60_000, // 5 min
+};
+
+function validateEmail(input: string): string | null {
+    const email = (input || "").trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) return null;
+    if (email.length > 254) return null;
+    return email;
+}
+
+function validatePassword(pwd: string): string | null {
+    if (!pwd) return "Contraseña no válida.";
+    if (pwd.length < 8)
+        return "La contraseña debe tener al menos 8 caracteres.";
+    if (pwd.length > 256) return "La contraseña es demasiado larga.";
+    if (/[\r\n\u0000]/.test(pwd))
+        return "La contraseña contiene caracteres no permitidos.";
+    return null;
+}
+
 /**
+ * Server Action — runs only on the Node.js server.
+ *
  * Validates the e-mail format, ensures its domain belongs to this Carbonio
  * server and that the account has `zimbraPasswordMustChange = TRUE`.
  *
- * We intentionally return the same generic error for "unknown account" and
- * "account doesn't require a change" to avoid leaking account existence.
+ * SECURITY:
+ *   - All inputs are validated before reaching the backend.
+ *   - Errors from zmprov/SOAP are NEVER forwarded to the client; the same
+ *     generic message is used for "unknown account" and "doesn't require
+ *     change" to prevent account enumeration.
+ *   - Rate-limited per client IP.
  */
 export async function checkEmail(emailRaw: string): Promise<CheckEmailResult> {
-    const email = (emailRaw || "").trim().toLowerCase();
-
-    if (!EMAIL_RE.test(email)) {
-        return { ok: false, error: "Formato de correo electrónico no válido." };
+    const ip = await getClientIp();
+    const rl = checkRateLimit(ip, CHECK_LIMIT);
+    if (!rl.ok) {
+        console.warn(`[action] checkEmail: rate-limited ip=${ip}`);
+        return {
+            ok: false,
+            error: `Demasiados intentos. Vuelva a intentarlo en ${Math.ceil(rl.retryAfterMs / 1000)} segundos.`,
+        };
     }
 
+    const email = validateEmail(emailRaw);
+    if (!email) {
+        return { ok: false, error: "Formato de correo electrónico no válido." };
+    }
+    console.log("[action] checkEmail:", email, `ip=${ip}`);
+
     const domain = email.split("@")[1];
-    await ensureDomainsLoaded();
+    try {
+        await ensureDomainsLoaded();
+    } catch (err) {
+        console.error("[action] checkEmail: domain cache load failed:", err);
+        return { ok: false, error: GENERIC_FAILURE };
+    }
     if (!isDomainAllowed(domain)) {
         return {
             ok: false,
@@ -41,55 +97,52 @@ export async function checkEmail(emailRaw: string): Promise<CheckEmailResult> {
     }
 
     try {
-        const { stdout } = await runZmprov([
-            "-l",
-            "ga",
-            email,
-            "zimbraPasswordMustChange",
-        ]);
-
-        const mustChange = /zimbraPasswordMustChange:\s*TRUE/i.test(stdout);
+        const backend = await getBackend();
+        const mustChange = await backend.getMustChange(email);
         if (!mustChange) {
-            return {
-                ok: false,
-                error:
-                    "La cuenta no requiere un cambio de contraseña en este momento.",
-            };
+            return { ok: false, error: GENERIC_NOT_ELIGIBLE };
         }
         return { ok: true, email };
-    } catch {
-        // zmprov returns non-zero when the account is unknown; do not leak details.
-        return {
-            ok: false,
-            error:
-                "La cuenta no requiere un cambio de contraseña en este momento.",
-        };
+    } catch (err) {
+        // Map "account not found" to the same generic answer; log everything
+        // server-side for diagnostics.
+        if (err instanceof CarbonioError && err.code === "ACCOUNT_NOT_FOUND") {
+            console.log("[action] checkEmail: account not found", email);
+            return { ok: false, error: GENERIC_NOT_ELIGIBLE };
+        }
+        console.error("[action] checkEmail: backend error:", err);
+        return { ok: false, error: GENERIC_NOT_ELIGIBLE };
     }
 }
 
-function validatePassword(pwd: string): string | null {
-    if (!pwd) return "Contraseña no válida.";
-    if (pwd.length < 8) return "La contraseña debe tener al menos 8 caracteres.";
-    if (pwd.length > 256) return "La contraseña es demasiado larga.";
-    if (/[\r\n\u0000]/.test(pwd))
-        return "La contraseña contiene caracteres no permitidos.";
-    return null;
-}
-
 /**
+ * Server Action — runs only on the Node.js server.
+ *
  * Sets a new password for the account and clears `zimbraPasswordMustChange`.
+ * Re-runs `checkEmail` first so a direct POST to this action can NOT bypass
+ * the eligibility check.
  *
- * Re-checks the email/domain/mustChange flag before mutating to prevent direct
- * POSTs from bypassing the first step.
- *
- * The password is sent to zmprov via stdin (interactive shell mode) so it does
- * NOT appear in the OS process list.
+ * SECURITY:
+ *   - Inputs are revalidated server-side; client-side checks are advisory.
+ *   - Errors from the backend are translated into safe Spanish strings —
+ *     the raw zmprov / SOAP text never reaches the browser.
+ *   - Rate-limited per client IP separately from `checkEmail`.
  */
 export async function changePassword(
     emailRaw: string,
     password: string,
     confirmation: string,
 ): Promise<ChangePasswordResult> {
+    const ip = await getClientIp();
+    const rl = checkRateLimit(ip, CHANGE_LIMIT);
+    if (!rl.ok) {
+        console.warn(`[action] changePassword: rate-limited ip=${ip}`);
+        return {
+            ok: false,
+            error: `Demasiados intentos. Vuelva a intentarlo en ${Math.ceil(rl.retryAfterMs / 60_000)} minuto(s).`,
+        };
+    }
+
     if (password !== confirmation) {
         return { ok: false, error: "Las contraseñas no coinciden." };
     }
@@ -100,55 +153,35 @@ export async function changePassword(
     if (!pre.ok) return pre;
 
     const email = pre.email;
+    const backend = await getBackend();
 
-    // 1) Set the new password. Sent via stdin (interactive mode) so the
-    //    password never appears in argv / `ps`. The password is double-quoted
-    //    and back-slashes / quotes inside it are escaped, matching zmprov's
-    //    interactive tokenizer.
-    const quoted =
-        '"' + password.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-    const setPasswordScript = `sp ${email} ${quoted}\nexit\n`;
-
+    // 1) Set the new password.
     try {
-        await runZmprov([], setPasswordScript);
+        await backend.setPassword(email, password);
         console.log("[action] changePassword: password set for", email);
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[action] changePassword: sp failed:", msg);
-
-        if (/password/i.test(msg) && /policy|complex|history|length/i.test(msg)) {
+        if (err instanceof CarbonioError && err.code === "PASSWORD_POLICY") {
             return {
                 ok: false,
                 error:
                     "La nueva contraseña no cumple con la política del dominio.",
             };
         }
-        return {
-            ok: false,
-            error: "No fue posible actualizar la contraseña. Inténtelo de nuevo.",
-        };
+        console.error("[action] changePassword: setPassword failed:", err);
+        return { ok: false, error: GENERIC_FAILURE };
     }
 
-    // 2) Clear the mustChange flag in a separate zmprov invocation. This one
-    //    has no secrets, so we can pass it as plain argv.
+    // 2) Clear the mustChange flag in a separate request.
     try {
-        await runZmprov([
-            "ma",
-            email,
-            "zimbraPasswordMustChange",
-            "FALSE",
-        ]);
+        await backend.clearMustChange(email);
         console.log(
             "[action] changePassword: zimbraPasswordMustChange cleared for",
             email,
         );
     } catch (err) {
-        // The password change already succeeded; surface a softer error so the
-        // user knows their new password works, but flag the inconsistency.
         console.error(
-            "[action] changePassword: failed to clear mustChange for",
-            email,
-            err instanceof Error ? err.message : err,
+            "[action] changePassword: clearMustChange failed:",
+            err,
         );
         return {
             ok: false,
@@ -159,5 +192,3 @@ export async function changePassword(
 
     return { ok: true, redirect: getWebmailUrl() };
 }
-
-
